@@ -18,9 +18,13 @@
 
 ### Option A: Docker Compose (PostgreSQL + Backend + Frontend)
 
+For the container deployment, environment setup, and importing existing local
+accounts/tickets, follow [Docker deployment](docs/docker_deployment.md).
+The container frontend is served at `http://localhost:8080`.
+
 ```bash
-cp .env.example .env
-docker compose up --build -d
+# Configure .env.docker as described in docs/docker_deployment.md first
+docker compose --env-file .env.docker up --build -d --wait
 ```
 
 ### Option B: Running Backend & Frontend Directly

@@ -64,3 +64,5 @@ Thumbs.db
 # Local runtime caches, generated reports and account credential exports
 .vite/
 outputs/
+
+.env.docker
