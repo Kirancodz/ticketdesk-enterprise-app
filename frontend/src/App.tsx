@@ -5,6 +5,7 @@ import { AuthProvider } from "./contexts/AuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { AppLayout } from "./layouts/AppLayout";
 import { LoginPage } from "./pages/LoginPage";
+import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { TicketsListPage } from "./pages/TicketsListPage";
 import { CreateTicketPage } from "./pages/CreateTicketPage";
@@ -34,6 +35,7 @@ export const App: React.FC = () => {
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/change-password" element={<ChangePasswordPage />} />
 
             <Route
               path="/"

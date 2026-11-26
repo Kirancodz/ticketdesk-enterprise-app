@@ -41,7 +41,6 @@ export const ProfilePage: React.FC = () => {
   const [employeeId, setEmployeeId] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [phone, setPhone] = useState("");
-  const [newPassword, setNewPassword] = useState("");
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -70,12 +69,10 @@ export const ProfilePage: React.FC = () => {
           employee_id: employeeId || null,
           job_title: jobTitle || null,
           phone: phone || null,
-          new_password: newPassword.trim() ? newPassword.trim() : null,
         }),
       }),
     onSuccess: async () => {
       setSaveError(null);
-      setNewPassword("");
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 4000);
       await refreshProfile();
@@ -387,15 +384,15 @@ export const ProfilePage: React.FC = () => {
             <div className="space-y-1.5">
               <label className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-700">
                 <KeyRound className="w-3.5 h-3.5 text-blue-600" />
-                Change Password (Optional)
+                Password Security
               </label>
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Leave blank to keep current password"
-                className="w-full px-3.5 py-2.5 text-xs rounded-lg bg-slate-50 border border-slate-300 text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white"
-              />
+              <button
+                type="button"
+                onClick={() => navigate("/change-password")}
+                className="w-full px-3.5 py-2.5 text-xs rounded-lg bg-blue-50 border border-blue-200 text-blue-700 font-semibold hover:bg-blue-100"
+              >
+                Change Password Securely
+              </button>
             </div>
           </div>
 

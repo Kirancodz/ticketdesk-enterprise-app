@@ -310,7 +310,7 @@ def test_legacy_transfers_migrate_to_closed_with_an_audit_event(workflow, monkey
     cfg = Config(str(backend / "alembic.ini"))
     cfg.set_main_option("script_location", str(backend / "migrations"))
     command.stamp(cfg, "0004_stable_account_sessions")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0005_transfer_segment_closure")
     with factory() as db:
         row = db.get(Ticket, original["id"])
         assert row.status == "closed" and row.closed_at and row.resolved_at is None
@@ -318,3 +318,80 @@ def test_legacy_transfers_migrate_to_closed_with_an_audit_event(workflow, monkey
     visible = request("GET", f"/tickets/{original['id']}", "employee").json()
     assert visible["status"] == "closed" and visible["transfer_outcome"] == "transferred"
     assert visible["sla"]["sla_health"] == "closed"
+
+
+def test_admin_sees_unclaimed_system_password_recovery(workflow):
+    from datetime import datetime, timezone
+
+    request, create, factory, users, teams = workflow
+
+    normal = create()
+    recovery = create()
+    lookalike = create()
+
+    with factory() as db:
+        iam = SupportTeam(
+            name="Identity and Access Management",
+            code="IAM",
+            is_active=True,
+        )
+        db.add(iam)
+        db.flush()
+
+        for ticket_id in (recovery["id"], lookalike["id"]):
+            ticket = db.get(Ticket, ticket_id)
+            ticket.support_team_id = iam.id
+            ticket.subcategory = "Password Reset"
+            ticket.priority = "critical"
+            ticket.status = "open"
+
+        db.add(TicketHistory(
+            ticket_id=recovery["id"],
+            actor_id=None,
+            action="CREATED",
+            field_name="status",
+            old_value=None,
+            new_value="open",
+            description=(
+                "System created an unverified password recovery request. "
+                "Identity verification is required before any reset."
+            ),
+            created_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
+
+    response = request("GET", "/tickets?my_tickets=true", "admin")
+    assert response.status_code == 200, response.text
+
+    ids = [item["id"] for item in response.json()["items"]]
+
+    assert ids == [recovery["id"]], ids
+    assert normal["id"] not in ids
+    assert lookalike["id"] not in ids
+
+    all_response = request("GET", "/tickets", "admin")
+    assert all_response.status_code == 200
+    all_ids = [item["id"] for item in all_response.json()["items"]]
+    assert all_ids.count(recovery["id"]) == 1
+
+
+@pytest.mark.parametrize(
+    "role,job_title,expected",
+    [
+        ("employee", None, "Employee"),
+        ("agent", "IT Consultant", "IT Consultant"),
+        ("agent", "Cloud Engineer", "Cloud Engineer"),
+        ("agent", None, "IT Support Agent"),
+        ("admin", "Director", "Administrator"),
+    ],
+)
+def test_password_recovery_role_label_uses_actual_designation(
+    role, job_title, expected
+):
+    from types import SimpleNamespace
+    from app.services.password_recovery_service import (
+        password_recovery_role_label,
+    )
+
+    user = SimpleNamespace(role=role, job_title=job_title)
+    assert password_recovery_role_label(user) == expected

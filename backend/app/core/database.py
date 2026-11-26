@@ -6,10 +6,13 @@ from app.core.config import settings
 connect_args = {}
 if settings.DATABASE_URL.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
+elif settings.APP_ENV == "production":
+    connect_args = {"connect_timeout": 5}
 
 engine = create_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,
+    hide_parameters=True,
     connect_args=connect_args,
 )
 

@@ -31,6 +31,8 @@ from app.schemas.ticket import (
 )
 from app.schemas.user import UserSummary
 from app.services.audit_service import create_notification, record_audit_log
+from app.services.ticket_folder_sync import queue_ticket_folder_creation
+from app.services.ticket_discussion_sync import queue_ticket_discussion_sync
 from app.services.sla_service import apply_sla_policy_to_ticket, ensure_utc, evaluate_ticket_sla
 from app.services.ticket_access import require_ticket_reader, require_ticket_manager, can_manage_ticket, scoped_ticket_query, personal_ticket_condition
 from app.services.ticket_workflow import accept_ticket, change_status, assign_ticket, ticket_lineage, provisional_ticket_number, finalize_ticket_number
@@ -202,9 +204,48 @@ def list_tickets_service(
 ) -> PaginatedTicketsResponse:
     query = scoped_ticket_query(db, current_user, personal=my_tickets, available=not my_tickets and not assigned_to_me)
     if my_tickets and current_user.role == "admin":
-        query = query.filter(personal_ticket_condition(current_user), Ticket.status != "open",
-            or_(exists().where(TicketWorkRecord.ticket_id == Ticket.id, TicketWorkRecord.user_id == current_user.id),
-                ~exists().where(TicketTransferLink.successor_ticket_id == Ticket.id)))
+        # Preserve the existing My Tickets rules for ordinary tickets.
+        regular_admin_tickets = and_(
+            personal_ticket_condition(current_user),
+            Ticket.status != "open",
+            or_(
+                exists().where(
+                    TicketWorkRecord.ticket_id == Ticket.id,
+                    TicketWorkRecord.user_id == current_user.id,
+                ),
+                ~exists().where(
+                    TicketTransferLink.successor_ticket_id == Ticket.id
+                ),
+            ),
+        )
+
+        # System-generated Critical IAM password recovery requests are
+        # available immediately in every administrator's My Tickets.
+        # No manual Accept / Claim action is required.
+        recovery_requests = and_(
+            Ticket.subcategory == "Password Reset",
+            Ticket.priority == "critical",
+            Ticket.status.in_(("open", "assigned", "in_progress", "pending")),
+            Ticket.transferred_at.is_(None),
+            exists().where(
+                SupportTeam.id == Ticket.support_team_id,
+                SupportTeam.code == "IAM",
+                SupportTeam.is_active.is_(True),
+            ),
+            exists().where(
+                TicketHistory.ticket_id == Ticket.id,
+                TicketHistory.actor_id.is_(None),
+                TicketHistory.action == "CREATED",
+                TicketHistory.description == (
+                    "System created an unverified password recovery request. "
+                    "Identity verification is required before any reset."
+                ),
+            ),
+        )
+
+        query = query.filter(
+            or_(regular_admin_tickets, recovery_requests)
+        )
     if assigned_to_me:
         if current_user.role == "admin":
             query = query.filter(Ticket.assigned_agent_id == current_user.id, Ticket.status == "open")
@@ -406,6 +447,7 @@ def create_ticket_service(
 
     db.commit()
     db.refresh(ticket)
+    queue_ticket_folder_creation(ticket.ticket_number)
     return ticket
 
 
@@ -607,6 +649,11 @@ def add_ticket_comment_service(
 
     db.commit()
     db.refresh(comment)
+    queue_ticket_discussion_sync(
+        ticket.ticket_number,
+        comment,
+        current_user.full_name,
+    )
     return comment
 
 

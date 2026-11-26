@@ -1,3 +1,6 @@
+import uuid
+import ipaddress
+import socket
 import re
 import secrets
 import time
@@ -21,6 +24,8 @@ from app.core.security import (
 from app.middleware.rate_limit import get_client_ip, login_rate_limiter
 from app.models.user import RefreshToken, User
 from app.schemas.auth import (
+    ForgotPasswordTicketRequest,
+    ChangePasswordRequest,
     AdminProfileUpdateRequest,
     AuthUserResponse,
     DepartmentInfo,
@@ -36,6 +41,9 @@ from app.schemas.auth import (
 )
 from app.services.audit_service import record_audit_log
 from app.services.sla_service import ensure_utc
+
+from app.middleware.rate_limit import password_reset_request_limiter
+from app.services.password_recovery_service import create_password_recovery_ticket
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -131,6 +139,7 @@ def build_auth_user_response(user: User) -> AuthUserResponse:
         job_title=user.job_title,
         phone=user.phone,
         is_active=user.is_active,
+        must_change_password=user.must_change_password,
         role=user.role,
         role_info=UserRoleInfo.model_validate(user.role_rel) if user.role_rel else None,
         department=DepartmentInfo.model_validate(user.department_rel) if user.department_rel else None,
@@ -211,116 +220,136 @@ def login(
     )
 
 
-@router.post("/forgot-password/request-otp", response_model=ForgotPasswordOTPResponse)
-def request_password_reset_otp(
-    payload: ForgotPasswordOTPRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> ForgotPasswordOTPResponse:
-    user = _find_user_for_otp(db, payload.email, payload.phone)
-    otp_code = f"{secrets.randbelow(900000) + 100000:06d}"
-    phone_digits = _normalize_phone_digits(payload.phone)
-
-    with _otp_lock:
-        _otp_store[user.id] = {
-            "otp_hash": hash_token(otp_code),
-            "expires_at": time.time() + OTP_EXPIRY_SECONDS,
-            "phone_digits": phone_digits[-10:],
-            "attempts": 0,
-        }
-
-    masked = _mask_phone(user.phone or payload.phone)
-    logger.info(
-        f"[OTP AUTHENTICATOR] Generated 6-digit OTP {otp_code} for user {user.email} (phone {masked})"
-    )
-
-    record_audit_log(
-        db=db,
-        user_id=user.id,
-        action="PASSWORD_OTP_REQUESTED",
-        entity_type="user",
-        entity_id=user.id,
-        metadata={"email": user.email, "masked_phone": masked},
-        ip_address=get_client_ip(request),
-    )
-    db.commit()
-
-    return ForgotPasswordOTPResponse(
-        success=True,
-        message=f"A 6-digit verification OTP has been sent to your registered phone ({masked}).",
-        masked_phone=masked,
-        email=user.email,
-        expires_in_seconds=OTP_EXPIRY_SECONDS,
-        dev_otp_code=otp_code if settings.APP_ENV != "production" else None,
-    )
 
 
-@router.post("/forgot-password/verify-reset")
-def verify_otp_and_reset_password(
-    payload: ForgotPasswordResetRequest,
+
+
+
+
+
+@router.post(
+    "/forgot-password/request-ticket",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_password_recovery_ticket(
+    payload: ForgotPasswordTicketRequest,
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
-    user = _find_user_for_otp(db, payload.email, payload.phone)
+    """Accept an unverified password recovery request."""
 
-    with _otp_lock:
-        entry = _otp_store.get(user.id)
-        if not entry:
-            raise AppException(
-                message="No active OTP request found. Please request a new OTP code.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-                error_code="OTP_NOT_FOUND",
+    email = str(payload.email).strip().lower()
+
+    # Trust forwarded IP only from our Docker frontend service.
+    # Nginx overwrites X-Forwarded-For with $remote_addr.
+    peer_ip = request.client.host if request.client else ""
+    client_ip = peer_ip or "unknown"
+
+    try:
+        trusted_proxy_ips = {
+            address[4][0]
+            for address in socket.getaddrinfo(
+                "frontend", None, type=socket.SOCK_STREAM
             )
-        if time.time() > entry["expires_at"]:
-            _otp_store.pop(user.id, None)
-            raise AppException(
-                message="Your OTP code has expired. Please request a new OTP.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-                error_code="OTP_EXPIRED",
-            )
-        entry["attempts"] += 1
-        if entry["attempts"] > 5:
-            _otp_store.pop(user.id, None)
-            raise AppException(
-                message="Too many invalid OTP attempts. Please request a new OTP.",
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                error_code="OTP_MAX_ATTEMPTS",
-            )
-        if entry["otp_hash"] != hash_token(payload.otp_code.strip()):
-            raise AppException(
-                message="Invalid 6-digit OTP verification code.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-                error_code="INVALID_OTP_CODE",
-            )
-        # Validated — consume OTP
-        _otp_store.pop(user.id, None)
+        }
+    except OSError:
+        trusted_proxy_ips = set()
+
+    if peer_ip in trusted_proxy_ips:
+        forwarded = request.headers.get("x-forwarded-for", "").strip()
+        if forwarded and "," not in forwarded:
+            try:
+                client_ip = str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+
+    password_reset_request_limiter.check_and_record(
+        client_ip=client_ip,
+        identifier=email,
+    )
+
+    matched = create_password_recovery_ticket(
+        db=db,
+        email=email,
+        employee_id=payload.employee_id,
+        reason=payload.reason,
+        client_ip=client_ip,
+    )
+
+    if not matched:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail="Incorrect Email ID or Employee ID.",
+        )
+
+    return {
+        "message": "Request submitted successfully!"
+    }
+
+
+@router.post("/change-password")
+def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Change password and invalidate every existing login session."""
+
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise AppException(
+            message="Current password is incorrect.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_code="INCORRECT_CURRENT_PASSWORD",
+        )
+
+    if payload.new_password != payload.confirm_password:
+        raise AppException(
+            message="New password and confirmation do not match.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_code="PASSWORD_MISMATCH",
+        )
+
+    if verify_password(payload.new_password, current_user.hashed_password):
+        raise AppException(
+            message="New password must be different from the current password.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_code="PASSWORD_REUSE",
+        )
 
     now = datetime.now(timezone.utc)
-    user.hashed_password = get_password_hash(payload.new_password)
-    user.updated_at = now
 
-    # Revoke any existing refresh tokens
+    current_user.hashed_password = get_password_hash(payload.new_password)
+    current_user.must_change_password = False
+    current_user.session_identity = str(uuid.uuid4())
+    current_user.updated_at = now
+
     db.query(RefreshToken).filter(
-        RefreshToken.user_id == user.id,
-        RefreshToken.revoked == False,  # noqa: E712
-    ).update({"revoked": True, "revoked_at": now})
+        RefreshToken.user_id == current_user.id,
+        RefreshToken.revoked == False,
+    ).update(
+        {"revoked": True, "revoked_at": now},
+        synchronize_session=False,
+    )
 
     record_audit_log(
         db=db,
-        user_id=user.id,
-        action="PASSWORD_RESET_VIA_OTP",
+        user_id=current_user.id,
+        action="PASSWORD_CHANGED",
         entity_type="user",
-        entity_id=user.id,
-        metadata={"email": user.email, "method": "phone_otp"},
+        entity_id=current_user.id,
+        metadata={"method": "authenticated_password_change"},
         ip_address=get_client_ip(request),
     )
+
     db.commit()
 
     return {
         "success": True,
-        "message": "Password has been reset successfully. You may now sign in with your new password.",
+        "message": "Password changed successfully. Please log in again.",
+        "logout_required": True,
     }
-
 
 @router.post("/refresh", response_model=TokenResponse)
 def refresh_access_token(
@@ -463,8 +492,12 @@ def update_admin_profile(
         current_user.department_id = payload.department_id if payload.department_id > 0 else None
     if payload.support_team_id is not None:
         current_user.support_team_id = payload.support_team_id if payload.support_team_id > 0 else None
-    if payload.new_password:
-        current_user.hashed_password = get_password_hash(payload.new_password)
+    if payload.new_password is not None:
+        raise AppException(
+            message="Use the Change Password page to update your password.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_code="PASSWORD_CHANGE_ACTION_REQUIRED",
+        )
 
     current_user.updated_at = datetime.now(timezone.utc)
 

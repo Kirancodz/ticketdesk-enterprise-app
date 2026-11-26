@@ -20,6 +20,7 @@ class User(Base):
     job_title = Column(String(120), nullable=True)
     phone = Column(String(40), nullable=True)
     hashed_password = Column(String(255), nullable=False)
+    must_change_password = Column(Boolean, default=False, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False, index=True)
 
     role_id = Column(Integer, ForeignKey("roles.id", ondelete="RESTRICT"), nullable=False, index=True)

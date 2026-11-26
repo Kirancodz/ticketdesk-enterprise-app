@@ -39,6 +39,7 @@ export interface AuthUser {
   job_title?: string | null;
   phone?: string | null;
   is_active: boolean;
+  must_change_password: boolean;
   role: RoleType;
   role_info?: UserRoleInfo | null;
   department?: DepartmentInfo | null;

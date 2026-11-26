@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from app.schemas.auth import DepartmentInfo, SupportTeamInfo, UserRoleInfo
 
@@ -44,6 +44,13 @@ class UserCreateRequest(BaseModel):
     email: EmailStr
     full_name: str = Field(..., min_length=2, max_length=150)
     password: str = Field(..., min_length=4, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def check_initial_password_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must not exceed 72 UTF-8 bytes.")
+        return value
     employee_id: Optional[str] = Field(None, max_length=50)
     job_title: Optional[str] = Field(None, max_length=120)
     phone: Optional[str] = Field(None, max_length=40)
@@ -70,6 +77,16 @@ class UserUpdateRequest(BaseModel):
     support_team_id: Optional[int] = None
     is_active: Optional[bool] = None
     password: Optional[str] = Field(None, min_length=4, max_length=128)
+
+
+class AdminPasswordResetRequest(BaseModel):
+    recovery_ticket_id: int = Field(..., ge=1)
+    identity_verified: Literal[True]
+    verification_method: Literal[
+        "in_person_id",
+        "manager_callback",
+        "hr_confirmation",
+    ]
 
 
 class UserRoleUpdateRequest(BaseModel):

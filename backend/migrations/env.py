@@ -1,23 +1,22 @@
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool, text
+from sqlalchemy.exc import SQLAlchemyError
 from alembic import context
+from alembic.util import CommandError
 from app.core.config import settings
 from app.core.database import Base
 import app.models  # noqa: F401 - Ensure all models are imported
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
-
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if config.config_file_name is not None and config.cmd_opts is not None:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=settings.DATABASE_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -28,17 +27,27 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        settings.DATABASE_URL,
+        hide_parameters=True,
         poolclass=pool.NullPool,
     )
 
-    with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-
-        with context.begin_transaction():
-            context.run_migrations()
+    try:
+        with connectable.connect() as connection:
+            context.configure(connection=connection, target_metadata=target_metadata)
+            with context.begin_transaction():
+                if connection.dialect.name == "postgresql":
+                    # Serialize Alembic commands across deployment processes.
+                    connection.execute(text("SELECT pg_advisory_xact_lock(6073475853914031)"))
+                context.run_migrations()
+    except SQLAlchemyError as exc:
+        raise CommandError(
+            f"Database migration operation failed ({type(exc).__name__}). "
+            "Check database connectivity, privileges, and the target schema."
+        ) from None
+    finally:
+        connectable.dispose()
 
 
 if context.is_offline_mode():

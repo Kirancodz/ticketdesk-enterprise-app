@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.logging_config import logger
@@ -308,37 +310,38 @@ Please submit requests at least **48 hours** prior to your move date under **Cat
     ]
 
 
-def seed_database(db: Session) -> None:
-    """Idempotent enterprise database seeder for TicketDesk Enterprise."""
-    if db.query(Role).count() > 0:
-        # Existing user/ticket records must never be deleted during routine startup.
-        ensure_extended_kb_and_categories(db)
-        logger.info("Database verified; existing user and ticket data preserved.")
-        return
+def _insert_missing_reference_rows(db: Session, model, key, rows: list[dict]) -> bool:
+    existing = set(db.scalars(select(key)))
+    missing = [row for row in rows if row[key.key] not in existing]
+    if not missing:
+        return False
+    insert = sqlite_insert if db.get_bind().dialect.name == "sqlite" else postgres_insert
+    db.execute(insert(model).values(missing).on_conflict_do_nothing(index_elements=[key]))
+    return True
 
-    logger.info("Initializing TicketDesk Enterprise core configuration and Administrator account...")
-    now = datetime.now(timezone.utc)
 
-    # 1. Roles
-    role_admin = Role(
-        name="admin",
-        display_name="IT Administrator",
-        description="Full administrative access to users, SLA policies, audit logs, and enterprise settings.",
-    )
-    role_agent = Role(
-        name="agent",
-        display_name="IT Support Agent",
-        description="Operational access to ticket queues, incident resolution, SLA tracking, and knowledge base.",
-    )
-    role_employee = Role(
-        name="employee",
-        display_name="Employee",
-        description="Standard corporate user able to submit tickets, upload attachments, and track requests.",
-    )
-    db.add_all([role_admin, role_agent, role_employee])
-    db.flush()
+def initialize_reference_data(db: Session) -> bool:
+    """Fill missing built-in reference rows, preserving existing rows and users."""
+    # Roles
+    changed = _insert_missing_reference_rows(db, Role, Role.name, [
+        dict(
+            name="admin",
+            display_name="IT Administrator",
+            description="Full administrative access to users, SLA policies, audit logs, and enterprise settings.",
+        ),
+        dict(
+            name="agent",
+            display_name="IT Support Agent",
+            description="Operational access to ticket queues, incident resolution, SLA tracking, and knowledge base.",
+        ),
+        dict(
+            name="employee",
+            display_name="Employee",
+            description="Standard corporate user able to submit tickets, upload attachments, and track requests.",
+        ),
+    ])
 
-    # 2. Departments
+    # Departments
     departments_data = [
         ("Engineering & Product", "ENG", "Core software engineering and product development", "San Francisco HQ - Floor 4"),
         ("Finance & Accounting", "FIN", "Corporate finance, payroll, and treasury operations", "New York - Floor 12"),
@@ -348,46 +351,24 @@ def seed_database(db: Session) -> None:
         ("Legal & Compliance", "LEGAL", "Corporate governance, privacy, and regulatory affairs", "New York - Floor 14"),
         ("Information Technology", "IT", "Enterprise IT Service Management & Security Operations", "San Francisco HQ - Floor 5"),
     ]
-    dept_map: dict[str, Department] = {}
-    for name, code, desc, loc in departments_data:
-        d = Department(name=name, code=code, description=desc, location=loc, is_active=True)
-        db.add(d)
-        dept_map[code] = d
-    db.flush()
+    changed |= _insert_missing_reference_rows(db, Department, Department.code, [
+        dict(name=name, code=code, description=desc, location=loc, is_active=True)
+        for name, code, desc, loc in departments_data
+    ])
 
-    # 3. Active Support Teams (Only the 4 core teams; no Operation IT)
+    # Active support teams
     teams_data = [
         ("Infrastructure & Network Ops", "NETOPS", "VPN, Wi-Fi, firewalls, DNS, and cloud connectivity", "Network & Cloud"),
         ("Workplace & Endpoint Engineering", "ENDPOINT", "Corporate laptops, peripherals, OS imaging, and MDM", "Hardware & OS"),
         ("Identity & Access Governance", "IAM", "Active Directory, SSO/Okta, MFA, and role provisioning", "Identity & Security"),
         ("Enterprise Business Applications", "BIZAPPS", "ERP, CRM, Slack, Jira, Microsoft 365, and SaaS licensing", "Enterprise Software"),
     ]
-    team_map: dict[str, SupportTeam] = {}
-    for name, code, desc, spec in teams_data:
-        t = SupportTeam(name=name, code=code, description=desc, specialization=spec, is_active=True)
-        db.add(t)
-        team_map[code] = t
-    db.flush()
+    changed |= _insert_missing_reference_rows(db, SupportTeam, SupportTeam.code, [
+        dict(name=name, code=code, description=desc, specialization=spec, is_active=True)
+        for name, code, desc, spec in teams_data
+    ])
 
-    # 4. Initial Administrator Account Only (Admin can provision custom Employees/Agents via UI)
-    admin_user = User(
-        email="admin@ticketdesk.enterprise",
-        full_name="Evelyn Sterling",
-        employee_id="EMP-1001",
-        job_title="Director of Enterprise IT & ITSM",
-        phone="+1 (415) 890-1001",
-        hashed_password=get_password_hash("Admin@12345"),
-        is_active=True,
-        role_id=role_admin.id,
-        department_id=dept_map["IT"].id,
-        support_team_id=team_map["IAM"].id,
-        last_login_at=now,
-        created_at=now,
-    )
-    db.add(admin_user)
-    db.flush()
-
-    # 5. Ticket Categories (with "Others" in subcategories)
+    # Ticket categories
     categories_spec = [
         (
             "Hardware",
@@ -432,9 +413,8 @@ def seed_database(db: Session) -> None:
             "HelpCircle",
         ),
     ]
-    cat_map: dict[str, TicketCategory] = {}
-    for name, slug, desc, subs, icon in categories_spec:
-        c = TicketCategory(
+    changed |= _insert_missing_reference_rows(db, TicketCategory, TicketCategory.slug, [
+        dict(
             name=name,
             slug=slug,
             description=desc,
@@ -442,51 +422,29 @@ def seed_database(db: Session) -> None:
             icon=icon,
             is_active=True,
         )
-        db.add(c)
-        cat_map[slug] = c
-    db.flush()
+        for name, slug, desc, subs, icon in categories_spec
+    ])
 
-    # 6. SLA Policies
+    # SLA policies
     sla_specs = [
         ("Critical Incident SLA (P1)", "critical", 15, 240, False, "15-minute initial response and 4-hour resolution target for critical production or executive blockers."),
         ("High Priority SLA (P2)", "high", 60, 480, False, "1-hour initial response and 8-hour resolution target for severe degradation impacting work."),
         ("Medium Priority SLA (P3)", "medium", 240, 1440, True, "4-hour initial response and 24-hour resolution target for standard single-user technical issues."),
         ("Low Priority SLA (P4)", "low", 480, 2880, True, "8-hour initial response and 48-hour resolution target for routine requests and minor inquiries."),
     ]
-    for name, prio, resp_m, res_m, bh_only, desc in sla_specs:
-        db.add(
-            SLAPolicy(
-                name=name,
-                priority=prio,
-                response_target_minutes=resp_m,
-                resolution_target_minutes=res_m,
-                business_hours_only=bh_only,
-                description=desc,
-                is_active=True,
-            )
+    changed |= _insert_missing_reference_rows(db, SLAPolicy, SLAPolicy.priority, [
+        dict(
+            name=name,
+            priority=prio,
+            response_target_minutes=resp_m,
+            resolution_target_minutes=res_m,
+            business_hours_only=bh_only,
+            description=desc,
+            is_active=True,
         )
-    db.flush()
-
-    # 7. Knowledge Base Articles (10 articles across all 6 categories)
-    for title, slug, summary, content, cat_slug, tags, views, helpful in get_kb_articles_spec():
-        db.add(
-            KnowledgeArticle(
-                title=title,
-                slug=slug,
-                summary=summary,
-                content=content,
-                category_id=cat_map[cat_slug].id,
-                author_id=admin_user.id,
-                tags=tags,
-                is_published=True,
-                view_count=views,
-                helpful_count=helpful,
-                created_at=now - timedelta(days=20),
-                updated_at=now - timedelta(days=1),
-            )
-        )
-
-    # 8. System Settings
+        for name, prio, resp_m, res_m, bh_only, desc in sla_specs
+    ])
+    # System settings
     settings_seed = [
         ("organization_name", "TicketDesk Enterprise Corp", "general", "Primary organization display name across the portal and notifications."),
         ("support_portal_email", "it-helpdesk@ticketdesk.enterprise", "general", "Default reply-to address for IT Service Desk notifications."),
@@ -496,17 +454,63 @@ def seed_database(db: Session) -> None:
         ("storage_provider_mode", settings.STORAGE_PROVIDER, "storage", "Active attachment storage backend (local or Amazon S3)."),
         ("s3_bucket_name", settings.S3_BUCKET_NAME, "storage", "Configured Amazon S3 bucket for ticket attachments and Lambda event processing."),
     ]
-    for key, val, cat, desc in settings_seed:
+    changed |= _insert_missing_reference_rows(db, SystemSetting, SystemSetting.key, [
+        dict(key=key, value=val, category=cat, description=desc)
+        for key, val, cat, desc in settings_seed
+    ])
+    return changed
+
+
+def seed_database(db: Session) -> None:
+    """Preserve demo initialization for local, test, and verification environments."""
+    if settings.APP_ENV == "production":
+        initialize_reference_data(db)
+        db.commit()
+        return
+    if db.query(Role.id).first():
+        ensure_extended_kb_and_categories(db)
+        logger.info("Database verified; existing user and ticket data preserved.")
+        return
+
+    initialize_reference_data(db)
+    now = datetime.now(timezone.utc)
+    admin_user = User(
+        email="admin@ticketdesk.enterprise",
+        full_name="Evelyn Sterling",
+        employee_id="EMP-1001",
+        job_title="Director of Enterprise IT & ITSM",
+        phone="+1 (415) 890-1001",
+        hashed_password=get_password_hash("Admin@12345"),
+        is_active=True,
+        role_id=db.query(Role.id).filter_by(name="admin").scalar(),
+        department_id=db.query(Department.id).filter_by(code="IT").scalar(),
+        support_team_id=db.query(SupportTeam.id).filter_by(code="IAM").scalar(),
+        last_login_at=now,
+        created_at=now,
+    )
+    db.add(admin_user)
+    db.flush()
+
+    cat_map = {category.slug: category.id for category in db.query(TicketCategory).all()}
+    for title, slug, summary, content, cat_slug, tags, views, helpful in get_kb_articles_spec():
         db.add(
-            SystemSetting(
-                key=key,
-                value=val,
-                category=cat,
-                description=desc,
-                updated_by_id=admin_user.id,
-                updated_at=now,
+            KnowledgeArticle(
+                title=title,
+                slug=slug,
+                summary=summary,
+                content=content,
+                category_id=cat_map[cat_slug],
+                author_id=admin_user.id,
+                tags=tags,
+                is_published=True,
+                view_count=views,
+                helpful_count=helpful,
+                created_at=now - timedelta(days=20),
+                updated_at=now - timedelta(days=1),
             )
         )
+    for setting in db.query(SystemSetting).all():
+        setting.updated_by_id = admin_user.id
 
     db.add(
         AuditLog(

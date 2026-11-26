@@ -42,7 +42,8 @@ const createTicketSchema = z.object({
     .min(10, "Please provide at least 10 characters describing the issue and steps to reproduce"),
 });
 
-type CreateTicketFormValues = z.infer<typeof createTicketSchema>;
+type CreateTicketFormInput = z.input<typeof createTicketSchema>;
+type CreateTicketFormValues = z.output<typeof createTicketSchema>;
 
 export const CreateTicketPage: React.FC = () => {
   const { user } = useAuth();
@@ -84,7 +85,7 @@ export const CreateTicketPage: React.FC = () => {
     watch,
     setValue,
     formState: { errors, isSubmitting },
-  } = useForm<CreateTicketFormValues>({
+  } = useForm<CreateTicketFormInput, unknown, CreateTicketFormValues>({
     resolver: zodResolver(createTicketSchema),
     defaultValues: {
       subject: "",

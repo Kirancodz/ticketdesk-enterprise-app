@@ -1,28 +1,39 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.api.v1 import api_router
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine, get_db
+import app.services.ticket_log_sync  # Register history synchronization
 from app.core.exceptions import register_exception_handlers
 from app.core.logging_config import logger
-from app.services.seed_service import seed_database
+from app.core.schema import SchemaNotCurrent, require_current_schema
+from app.services.seed_service import initialize_reference_data, seed_database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} ({settings.APP_ENV})...")
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    try:
-        seed_database(db)
-    except Exception as exc:
-        logger.error(f"Database initialization/seeding error: {exc}", exc_info=True)
-    finally:
-        db.close()
+    if settings.APP_ENV == "production":
+        try:
+            with SessionLocal.begin() as db:
+                require_current_schema(db.connection())
+                initialize_reference_data(db)
+        except SchemaNotCurrent:
+            raise
+        except Exception:
+            logger.error("Production database initialization failed", exc_info=True)
+            raise RuntimeError("Production database initialization failed. Check connectivity and reference data.") from None
+    else:
+        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            try:
+                seed_database(db)
+            except Exception:
+                logger.error("Database initialization/seeding error", exc_info=True)
     yield
     logger.info(f"Shutting down {settings.APP_NAME}...")
 
@@ -56,23 +67,33 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.get("/health", tags=["Health"])
 @app.get(f"{settings.API_V1_STR}/health", tags=["Health"])
-def health_check(db: Session = Depends(get_db)) -> dict:
+def health_check(response: Response, db: Session = Depends(get_db)) -> dict:
     db_status = "healthy"
+    schema_status = "unchecked"
     db_dialect = engine.dialect.name
     try:
         db.execute(text("SELECT 1"))
-    except Exception as exc:
-        logger.error(f"Health check DB error: {exc}")
+        if settings.APP_ENV == "production":
+            require_current_schema(db.connection())
+            schema_status = "current"
+    except SchemaNotCurrent:
+        schema_status = "out_of_date"
+    except Exception:
+        logger.error("Health check DB error", exc_info=True)
         db_status = "unhealthy"
 
+    ready = db_status == "healthy" and schema_status != "out_of_date"
+    if not ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {
-        "status": "ok" if db_status == "healthy" else "degraded",
+        "status": "ok" if ready else "degraded",
         "service": settings.APP_NAME,
         "version": "1.0.0",
         "environment": settings.APP_ENV,
         "database": {
             "status": db_status,
             "engine": db_dialect,
+            "schema": schema_status,
         },
         "storage": {
             "provider": settings.STORAGE_PROVIDER,

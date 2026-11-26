@@ -1,6 +1,6 @@
 from typing import Callable, Sequence
 import jwt
-from fastapi import Depends, status
+from fastapi import Depends, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 from app.core.database import get_db
@@ -12,6 +12,7 @@ security_scheme = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -69,6 +70,25 @@ def get_current_user(
             message="Your user account has been deactivated. Contact an administrator.",
             status_code=status.HTTP_403_FORBIDDEN,
             error_code="ACCOUNT_DEACTIVATED",
+        )
+
+    # Temporary-password users must complete password change first.
+    allowed_paths = {
+        "/api/v1/auth/change-password",
+        "/api/v1/auth/me",
+        "/api/v1/auth/logout",
+        "/auth/change-password",
+        "/auth/me",
+        "/auth/logout",
+    }
+
+    current_path = request.url.path.rstrip("/")
+
+    if user.must_change_password and current_path not in allowed_paths:
+        raise AppException(
+            message="You must change your temporary password before continuing.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            error_code="PASSWORD_CHANGE_REQUIRED",
         )
 
     return user

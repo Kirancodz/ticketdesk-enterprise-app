@@ -34,10 +34,34 @@ export function getAuthSession(): AuthSession | null {
 export function getAccessToken(): string | null { return getAuthSession()?.accessToken || null; }
 export function getRefreshToken(): string | null { return getAuthSession()?.refreshToken || null; }
 
+function createSessionId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  const hex = Array.from(bytes, b =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20)
+  ].join("-");
+}
+
 export function setAuthTokens(accessToken: string, refreshToken: string): void {
   const identity = tokenIdentity(accessToken);
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify({ id: crypto.randomUUID(), ...identity, accessToken, refreshToken }));
-  // Legacy origin-wide sessions are never imported: another tab may own them.
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+    id: createSessionId(),
+    ...identity,
+    accessToken,
+    refreshToken
+  }));
   localStorage.removeItem("td_access_token");
   localStorage.removeItem("td_refresh_token");
 }

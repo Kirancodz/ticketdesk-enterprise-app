@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTicketLogsObjects",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::ticketdesk-poc-attachments-635476133762-ap-south-1/TicketLogs/Tickets/*"
+    }
+  ]
+}

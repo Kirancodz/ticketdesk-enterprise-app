@@ -125,7 +125,7 @@ class S3StorageProvider(StorageProvider):
         self.s3_client = boto3.client("s3", region_name=region)
 
     def save_file(self, ticket_number: str, stored_filename: str, content: bytes, content_type: str) -> str:
-        storage_key = f"tickets/{ticket_number}/{stored_filename}"
+        storage_key = f"TicketLogs/Tickets/{ticket_number}/Attachments/{stored_filename}"
         try:
             self.s3_client.put_object(
                 Bucket=self.bucket_name,

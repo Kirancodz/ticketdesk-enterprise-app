@@ -18,13 +18,9 @@
 
 ### Option A: Docker Compose (PostgreSQL + Backend + Frontend)
 
-For the container deployment, environment setup, and importing existing local
-accounts/tickets, follow [Docker deployment](docs/docker_deployment.md).
-The container frontend is served at `http://localhost:8080`.
-
 ```bash
-# Configure .env.docker as described in docs/docker_deployment.md first
-docker compose --env-file .env.docker up --build -d --wait
+cp .env.example .env
+docker compose up --build -d
 ```
 
 ### Option B: Running Backend & Frontend Directly
@@ -70,6 +66,7 @@ docker compose --env-file .env.docker up --build -d --wait
 
 - **Backend & AWS Lambda Pytest Suite**:
   ```bash
+  python -m pip install -r backend/requirements.txt -r backend/requirements-test.txt
   PYTHONPATH=backend pytest backend/tests/test_api.py lambda/file_processor/tests/test_handler.py -v
   ```
 - **Frontend Vitest Component & Utility Suite**:

@@ -1,0 +1,53 @@
+﻿name: TicketDesk Docker Build CI
+
+on:
+  push:
+    paths:
+      - "frontend/**"
+      - "backend/**"
+      - ".github/workflows/docker-ci.yml"
+
+  pull_request:
+    paths:
+      - "frontend/**"
+      - "backend/**"
+      - ".github/workflows/docker-ci.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-build:
+    name: Verify Production Docker Builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Frontend Image
+        run: |
+          docker build \
+            --tag ticketdesk-frontend-ci:verify \
+            ./frontend
+
+      - name: Build Backend Runtime Image
+        run: |
+          docker build \
+            --target runtime \
+            --tag ticketdesk-backend-ci:verify \
+            ./backend
+
+      - name: Verify Images
+        run: |
+          docker image inspect ticketdesk-frontend-ci:verify
+          docker image inspect ticketdesk-backend-ci:verify
+
+      - name: Docker Build Complete
+        run: |
+          echo "Frontend Docker Build: SUCCESS"
+          echo "Backend Docker Build: SUCCESS"
+          echo "No images deployed to AWS."

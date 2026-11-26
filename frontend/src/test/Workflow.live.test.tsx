@@ -29,16 +29,17 @@ it.skipIf(import.meta.env.VITE_RUN_ISOLATED_WORKFLOW !== "1")("isolated live UI:
     if (!resolved.startsWith("http://127.0.0.1:18000/")) throw new Error("Refusing to contact the user's application during verification");
     return nativeFetch(resolved, options);
   });
-  const loginUI = async (email: string, password = "Isolated-Test-Password123!") => {
+  const loginUI = async (email: string, destination: string, password = "Isolated-Test-Password123!") => {
     fireEvent.change(await screen.findByLabelText("Corporate Email"), { target: { value: email } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: password } });
     fireEvent.click(screen.getByRole("button", { name: "Sign In to TicketDesk" }));
+    await waitFor(() => expect(window.location.pathname).toBe(destination));
   };
   const visit = async (path: string) => { await act(async () => { window.history.pushState({}, "", path); window.dispatchEvent(new PopStateEvent("popstate")); }); };
   sessionStorage.clear(); localStorage.clear(); window.history.replaceState({}, "", "/login");
   try {
     render(<App />);
-    await loginUI("admin@ticketdesk.enterprise", "Admin@12345");
+    await loginUI("admin@ticketdesk.enterprise", "/dashboard", "Admin@12345");
     await screen.findByText("Enterprise Service Operations Center", {}, { timeout: 10000 });
     const adminSession = getAuthSession()!;
     fireEvent.click(screen.getByRole("link", { name: "Settings" }));
@@ -46,7 +47,8 @@ it.skipIf(import.meta.env.VITE_RUN_ISOLATED_WORKFLOW !== "1")("isolated live UI:
     expect(getAuthSession()?.id).toBe(adminSession.id);
     expect((await call("/auth/me", getAuthSession()!.accessToken)).id).toBe(admin.user.id);
     fireEvent.click(screen.getByTitle("Logout"));
-    await loginUI(people.employee.email);
+    // The employee cannot return to the administrator's Settings route.
+    await loginUI(people.employee.email, "/dashboard");
     await screen.findByText("My Total Tickets");
     const employeeSession = getAuthSession()!;
     fireEvent.click(screen.getByRole("link", { name: "Create Support Ticket" }));
@@ -67,11 +69,11 @@ it.skipIf(import.meta.env.VITE_RUN_ISOLATED_WORKFLOW !== "1")("isolated live UI:
     expect((await call("/auth/me", getAuthSession()!.accessToken)).id).toBe(people.employee.id);
     const original = (await call("/tickets", employeeSession.accessToken)).items.find((row: { subject: string }) => row.subject === subject);
     fireEvent.click(screen.getByTitle("Logout"));
-    await loginUI(people.software.email);
-    await screen.findByText("Enterprise Service Operations Center", {}, { timeout: 10000 });
+    const originalPath = `/tickets/${original.ticket_number}`;
+    await loginUI(people.software.email, originalPath);
+    await screen.findByText(subject);
     const softwareSession = getAuthSession()!;
     expect(screen.queryByRole("link", { name: /SLA Alerts/ })).not.toBeInTheDocument();
-    await visit(`/tickets/${original.ticket_number}`);
     fireEvent.click(await screen.findByRole("button", { name: "Accept Ticket" }));
     fireEvent.click(await screen.findByRole("button", { name: "Start Progress" }));
     await screen.findByRole("button", { name: "Mark Pending" });
@@ -88,9 +90,10 @@ it.skipIf(import.meta.env.VITE_RUN_ISOLATED_WORKFLOW !== "1")("isolated live UI:
     expect(old.status).toBe("closed");
     const successor = old.lineage.find((row: { relation: string }) => row.relation === "successor");
     fireEvent.click(screen.getByTitle("Logout"));
-    await loginUI(people.cloud.email);
-    await screen.findByText("Enterprise Service Operations Center", {}, { timeout: 10000 });
+    await loginUI(people.cloud.email, originalPath);
+    await screen.findByText(subject);
     const cloudSession = getAuthSession()!;
+    // The saved route is the original ticket. Open the successor for the handoff.
     await visit(`/tickets/${successor.ticket_number}`);
     const prior = await screen.findByRole("link", { name: new RegExp(`previous: ${original.ticket_number}`) });
     fireEvent.click(prior);
@@ -99,11 +102,13 @@ it.skipIf(import.meta.env.VITE_RUN_ISOLATED_WORKFLOW !== "1")("isolated live UI:
     await visit(`/tickets/${successor.ticket_number}`);
     fireEvent.click(await screen.findByRole("button", { name: "Accept Ticket" }));
     fireEvent.click(await screen.findByRole("button", { name: "Start Progress" }));
-    await screen.findByRole("button", { name: "Close Ticket" });
+    await screen.findByRole("button", { name: "Mark Pending" });
     await call(`/tickets/${successor.id}/comments`, employeeSession.accessToken, "POST", { body: "The issue is solved; we agree to close it." });
     expect((await call(`/tickets/${successor.id}`, cloudSession.accessToken)).status).toBe("in_progress");
     expect(getAuthSession()?.id).toBe(cloudSession.id);
-    fireEvent.click(screen.getByRole("button", { name: "Close Ticket" }));
+    const closeTicket = screen.getByRole("button", { name: "Close Ticket" });
+    await waitFor(() => expect(closeTicket).toBeEnabled());
+    fireEvent.click(closeTicket);
     await waitFor(async () => expect((await call(`/tickets/${successor.id}`, cloudSession.accessToken)).status).toBe("closed"));
     const personal = await call("/reports/tickets?scope=all&user_id=1", softwareSession.accessToken);
     expect(personal.records.map((row: { id: number }) => row.id)).toEqual([original.id]);
@@ -119,8 +124,8 @@ it.skipIf(import.meta.env.VITE_RUN_ISOLATED_WORKFLOW !== "1")("isolated live UI:
       escalated.push(await call(`/tickets/${pending.id}/transfer`, freshSoftware.access_token, "POST", { escalate_to_admin: true, assigned_agent_id: admin.user.id, reason: "Administrator review and routing required" }));
     }
     fireEvent.click(screen.getByTitle("Logout"));
-    await loginUI("admin@ticketdesk.enterprise", "Admin@12345");
-    await screen.findByText("Enterprise Service Operations Center", {}, { timeout: 10000 });
+    await loginUI("admin@ticketdesk.enterprise", "/reports", "Admin@12345");
+    await screen.findByRole("heading", { name: "Enterprise Reports & SLA Analytics" });
     fireEvent.click(screen.getByRole("link", { name: "Assigned to Me" }));
     await screen.findByText(escalated[0].ticket_number);
     expect(screen.getAllByText(new RegExp(`From Isolated software`)).length).toBeGreaterThan(0);

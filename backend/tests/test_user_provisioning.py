@@ -22,7 +22,34 @@ def test_three_roles_create_login_and_permissions(setup, role):
     assert data["support_team_id"] == team.id
     login = client.post("/api/v1/auth/login", json={"email": data["email"], "password": "TestPassword123!"})
     assert login.status_code == 200 and login.json()["user"]["role"] == role
+    assert login.json()["user"]["must_change_password"] is True
     auth = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    # New accounts cannot access protected features before changing password.
+    assert client.get("/api/v1/dashboard/summary", headers=auth).status_code == 403
+
+    changed = client.post(
+        "/api/v1/auth/change-password",
+        headers=auth,
+        json={
+            "current_password": "TestPassword123!",
+            "new_password": "RotatedPassword123!",
+            "confirm_password": "RotatedPassword123!",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+
+    # Previous access token must become invalid.
+    assert client.get("/api/v1/auth/me", headers=auth).status_code == 401
+
+    relogin = client.post(
+        "/api/v1/auth/login",
+        json={"email": data["email"], "password": "RotatedPassword123!"},
+    )
+    assert relogin.status_code == 200, relogin.text
+    assert relogin.json()["user"]["must_change_password"] is False
+
+    auth = {"Authorization": f"Bearer {relogin.json()['access_token']}"}
     assert client.get("/api/v1/dashboard/summary", headers=auth).status_code == 200
     assert client.get("/api/v1/users", headers=auth).status_code == (200 if role == "admin" else 403)
     assert client.get("/api/v1/notifications/sla-alerts", headers=auth).status_code == (200 if role == "admin" else 403)

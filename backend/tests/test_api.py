@@ -115,6 +115,30 @@ def test_admin_provisions_users_and_ticket_lifecycle(client: TestClient):
 
     # Employee logs in and creates a ticket with support_team_id and subcategory "Others"
     emp_tokens = _login(client, "custom.employee@ticketdesk.enterprise", "Employee@12345")
+    assert emp_tokens["user"]["must_change_password"] is True
+    emp_headers = {"Authorization": f"Bearer {emp_tokens['access_token']}"}
+
+    # First login cannot access the ticket system until password changes.
+    assert client.get("/api/v1/tickets/categories", headers=emp_headers).status_code == 403
+
+    changed = client.post(
+        "/api/v1/auth/change-password",
+        headers=emp_headers,
+        json={
+            "current_password": "Employee@12345",
+            "new_password": "EmployeeRotated@12345",
+            "confirm_password": "EmployeeRotated@12345",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+
+    # The original session must be revoked.
+    assert client.get("/api/v1/auth/me", headers=emp_headers).status_code == 401
+
+    emp_tokens = _login(
+        client, "custom.employee@ticketdesk.enterprise", "EmployeeRotated@12345"
+    )
+    assert emp_tokens["user"]["must_change_password"] is False
     emp_headers = {"Authorization": f"Bearer {emp_tokens['access_token']}"}
 
     categories = client.get("/api/v1/tickets/categories", headers=emp_headers).json()
@@ -139,32 +163,80 @@ def test_admin_provisions_users_and_ticket_lifecycle(client: TestClient):
     assert created_ticket["support_team_id"] == teams[0]["id"]
 
 
-def test_forgot_password_via_phone_otp(client: TestClient):
-    # Request OTP for custom.employee@ticketdesk.enterprise using phone +91 9876543210
-    otp_req = client.post(
-        "/api/v1/auth/forgot-password/request-otp",
-        json={"phone": "9876543210"},
-    )
-    assert otp_req.status_code == 200, otp_req.text
-    otp_data = otp_req.json()
-    assert otp_data["success"] is True
-    dev_otp = otp_data["dev_otp_code"]
-    assert dev_otp and len(dev_otp) == 6
+def test_forgot_password_matching_feedback_and_otp_disabled(
+    client: TestClient, monkeypatch
+):
+    from app.api.v1 import auth as auth_routes
 
-    # Verify OTP and set a new password
-    reset_resp = client.post(
-        "/api/v1/auth/forgot-password/verify-reset",
+    received = []
+
+    def capture_request(*, db, email, employee_id, reason, client_ip):
+        assert db is not None
+        received.append((email, employee_id, reason))
+        return (
+            email == "custom.employee@ticketdesk.enterprise"
+            and employee_id == "EMP-3001"
+        )
+
+    monkeypatch.setattr(
+        auth_routes,
+        "create_password_recovery_ticket",
+        capture_request,
+    )
+
+    known = client.post(
+        "/api/v1/auth/forgot-password/request-ticket",
         json={
-            "phone": "9876543210",
-            "otp_code": dev_otp,
-            "new_password": "NewPassword@123",
+            "email": "custom.employee@ticketdesk.enterprise",
+            "employee_id": "EMP-3001",
+            "reason": "I forgot my password and cannot log in.",
         },
     )
-    assert reset_resp.status_code == 200, reset_resp.text
 
-    # Sign in with the new password
-    relogin = _login(client, "custom.employee@ticketdesk.enterprise", "NewPassword@123")
-    assert "access_token" in relogin
+    unknown = client.post(
+        "/api/v1/auth/forgot-password/request-ticket",
+        json={
+            "email": "unknown.user@example.com",
+            "employee_id": "UNKNOWN001",
+            "reason": "I cannot access my account password.",
+        },
+    )
+
+    assert known.status_code == 202, known.text
+    assert known.json()["message"] == "Request submitted successfully!"
+
+    assert unknown.status_code == 400, unknown.text
+    assert (
+        "Incorrect Email ID or Employee ID." in unknown.text
+    ), unknown.text
+
+    assert received == [
+        (
+            "custom.employee@ticketdesk.enterprise",
+            "EMP-3001",
+            "I forgot my password and cannot log in.",
+        ),
+        (
+            "unknown.user@example.com",
+            "UNKNOWN001",
+            "I cannot access my account password.",
+        ),
+    ]
+
+    assert client.post(
+        "/api/v1/auth/forgot-password/request-ticket",
+        json={},
+    ).status_code == 422
+
+    assert client.post(
+        "/api/v1/auth/forgot-password/request-otp",
+        json={"phone": "9876543210"},
+    ).status_code == 404
+
+    assert client.post(
+        "/api/v1/auth/forgot-password/verify-reset",
+        json={},
+    ).status_code == 404
 
 
 def test_audit_log_csv_export_and_reports(client: TestClient):

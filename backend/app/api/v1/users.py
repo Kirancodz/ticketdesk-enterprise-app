@@ -1,6 +1,8 @@
+import secrets
+import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -10,10 +12,11 @@ from app.core.exceptions import AppException
 from app.core.security import get_password_hash
 from app.middleware.rate_limit import get_client_ip
 from app.models.organization import Department, Role, SupportTeam
-from app.models.ticket import Ticket, TicketAttachment, TicketComment, TicketHistory
-from app.models.user import User
+from app.models.ticket import Ticket, TicketAttachment, TicketCategory, TicketComment, TicketHistory
+from app.models.user import RefreshToken, User
 from app.schemas.auth import DepartmentInfo, SupportTeamInfo, UserRoleInfo
 from app.schemas.user import (
+    AdminPasswordResetRequest,
     DepartmentCreateRequest,
     PaginatedUsersResponse,
     SupportTeamCreateRequest,
@@ -279,6 +282,7 @@ def create_user(
             job_title=payload.job_title,
             phone=payload.phone.strip() if payload.phone and payload.phone.strip() else None,
             hashed_password=get_password_hash(payload.password),
+            must_change_password=True,
             is_active=payload.is_active,
             role_id=role_obj.id,
             department_id=department_id,
@@ -329,6 +333,13 @@ def update_user(
     if not user:
         raise AppException("User not found.", status.HTTP_404_NOT_FOUND)
 
+    if payload.password is not None:
+        raise AppException(
+            "Use the dedicated Admin Reset Password action.",
+            status.HTTP_400_BAD_REQUEST,
+            "PASSWORD_RESET_ACTION_REQUIRED",
+        )
+
     if payload.is_active is False and user.id == current_user.id:
         raise AppException("You cannot deactivate your own administrator account.", status.HTTP_400_BAD_REQUEST)
 
@@ -362,9 +373,6 @@ def update_user(
     if payload.is_active is not None:
         user.is_active = payload.is_active
         changes["is_active"] = user.is_active
-    if payload.password:
-        user.hashed_password = get_password_hash(payload.password)
-        changes["password_reset"] = True
 
     user.updated_at = datetime.now(timezone.utc)
 
@@ -463,3 +471,178 @@ def delete_user(
     )
     db.commit()
     return {"success": True, "message": f"User '{deleted_name}' deleted."}
+
+
+@router.post("/{user_id}/reset-password")
+def admin_reset_password(
+    user_id: int,
+    payload: AdminPasswordResetRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+) -> dict:
+    """Admin-assisted recovery after independent identity verification."""
+
+    if user_id == current_user.id:
+        raise AppException(
+            "Administrators cannot reset their own password through this action.",
+            status.HTTP_403_FORBIDDEN,
+            "SELF_PASSWORD_RESET_FORBIDDEN",
+        )
+
+    try:
+        user = (
+            db.query(User)
+            .filter(User.id == user_id)
+            .with_for_update(of=User)
+            .first()
+        )
+
+        if not user or not user.is_active:
+            raise AppException(
+                "Active user not found.",
+                status.HTTP_404_NOT_FOUND,
+                "USER_NOT_FOUND",
+            )
+
+        ticket = (
+            db.query(Ticket)
+            .filter(
+                Ticket.id == payload.recovery_ticket_id,
+                Ticket.requester_id == user.id,
+            )
+            .with_for_update(of=Ticket)
+            .first()
+        )
+
+        if not ticket:
+            raise AppException(
+                "Matching recovery ticket not found.",
+                status.HTTP_400_BAD_REQUEST,
+                "INVALID_RECOVERY_TICKET",
+            )
+
+        category = db.query(TicketCategory).filter(
+            TicketCategory.id == ticket.category_id,
+            TicketCategory.slug == "access",
+        ).first()
+
+        team = db.query(SupportTeam).filter(
+            SupportTeam.code == "IAM",
+            SupportTeam.is_active.is_(True),
+        ).first()
+
+        if (
+            not category
+            or not team
+            or ticket.subcategory != "Password Reset"
+            or ticket.priority != "critical"
+            or ticket.support_team_id != team.id
+            or ticket.status in ("resolved", "closed", "transferred")
+            or ticket.transferred_at is not None
+        ):
+            raise AppException(
+                "Ticket is not an active Critical IAM password recovery request.",
+                status.HTTP_400_BAD_REQUEST,
+                "INVALID_RECOVERY_TICKET",
+            )
+
+        # Only accept tickets created by the dedicated public recovery service.
+        system_created = db.query(TicketHistory.id).filter(
+            TicketHistory.ticket_id == ticket.id,
+            TicketHistory.actor_id.is_(None),
+            TicketHistory.action == "CREATED",
+            TicketHistory.description == (
+                "System created an unverified password recovery request. "
+                "Identity verification is required before any reset."
+            ),
+        ).first()
+
+        if not system_created:
+            raise AppException(
+                "This ticket was not created by the password recovery service.",
+                status.HTTP_400_BAD_REQUEST,
+                "INVALID_RECOVERY_ORIGIN",
+            )
+
+        already_reset = db.query(TicketHistory.id).filter(
+            TicketHistory.ticket_id == ticket.id,
+            TicketHistory.action == "ADMIN_PASSWORD_RESET",
+        ).first()
+
+        if already_reset:
+            raise AppException(
+                "This recovery ticket has already been used for a reset.",
+                status.HTTP_409_CONFLICT,
+                "RECOVERY_TICKET_ALREADY_USED",
+            )
+
+        # Cryptographically secure, 32-character ASCII temporary password.
+        temporary_password = secrets.token_urlsafe(24)
+        now = datetime.now(timezone.utc)
+
+        user.hashed_password = get_password_hash(temporary_password)
+        user.must_change_password = True
+        user.session_identity = str(uuid.uuid4())
+        user.updated_at = now
+
+        db.query(RefreshToken).filter(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked.is_(False),
+        ).update(
+            {
+                "revoked": True,
+                "revoked_at": now,
+            },
+            synchronize_session=False,
+        )
+
+        db.add(
+            TicketHistory(
+                ticket_id=ticket.id,
+                actor_id=current_user.id,
+                action="ADMIN_PASSWORD_RESET",
+                description=(
+                    "Administrator confirmed independent identity verification "
+                    "and issued a temporary password. Mandatory password "
+                    "change required at next sign-in."
+                ),
+                created_at=now,
+            )
+        )
+
+        record_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="ADMIN_PASSWORD_RESET",
+            entity_type="user",
+            entity_id=user.id,
+            metadata={
+                "recovery_ticket_id": ticket.id,
+                "verification_method": payload.verification_method,
+                "sessions_revoked": True,
+                "must_change_password": True,
+            },
+            ip_address=request.client.host if request.client else None,
+        )
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
+    # Never cache the one-time password response.
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+
+    return {
+        "success": True,
+        "message": (
+            "Temporary password generated. Share it securely with the "
+            "verified account holder. It will not be shown again."
+        ),
+        "temporary_password": temporary_password,
+        "must_change_password": True,
+    }

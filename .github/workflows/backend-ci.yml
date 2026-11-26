@@ -1,0 +1,47 @@
+﻿name: TicketDesk Backend CI
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-ci:
+    name: FastAPI Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Backend Test Image
+        run: |
+          docker build \
+            --target test \
+            --tag ticketdesk-backend-ci:latest \
+            ./backend
+
+      - name: Run Backend Tests
+        run: |
+          docker run --rm \
+            --network none \
+            --tmpfs /tmp:rw,nosuid,size=128m \
+            -e APP_ENV=development \
+            -e DATABASE_URL=sqlite:////tmp/ticketdesk_ci.db \
+            -e SECRET_KEY=ci-only-placeholder-signing-key-123456789 \
+            -e AWS_EC2_METADATA_DISABLED=true \
+            -e HOME=/tmp \
+            ticketdesk-backend-ci:latest \
+            python -m pytest -q -p no:cacheprovider tests

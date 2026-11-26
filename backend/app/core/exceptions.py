@@ -71,7 +71,13 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-        logger.error(f"Unhandled error on {request.method} {request.url.path}: {exc}", exc_info=True)
+        route = getattr(request.scope.get("route"), "path", "<unmatched route>")
+        logger.error(
+            "Unhandled error on %s %s",
+            request.method,
+            route,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={

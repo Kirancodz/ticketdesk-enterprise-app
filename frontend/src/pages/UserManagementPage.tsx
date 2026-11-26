@@ -48,6 +48,16 @@ export const UserManagementPage: React.FC = () => {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editUser, setEditUser] = useState<UserDetail | null>(null);
   const [teamModalOpen, setTeamModalOpen] = useState(false);
+  // Admin-assisted password reset
+  const [resetUser, setResetUser] = useState<UserDetail | null>(null);
+  const [recoveryTicketId, setRecoveryTicketId] = useState("");
+  const [verificationMethod, setVerificationMethod] = useState<
+    "in_person_id" | "manager_callback" | "hr_confirmation"
+  >("in_person_id");
+  const [verificationConfirmed, setVerificationConfirmed] = useState(false);
+  const [resetTemporaryPassword, setResetTemporaryPassword] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
+
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -68,8 +78,6 @@ export const UserManagementPage: React.FC = () => {
   // Edit user form state
   const [editName, setEditName] = useState("");
   const [editEmail, setEditEmail] = useState("");
-  const [editPassword, setEditPassword] = useState("");
-  const [showEditPassword, setShowEditPassword] = useState(false);
   const [editEmpId, setEditEmpId] = useState("");
   const [editTitle, setEditTitle] = useState("");
   const [editPhone, setEditPhone] = useState("");
@@ -176,7 +184,6 @@ export const UserManagementPage: React.FC = () => {
             support_team_id: editTeamId ? Number(editTeamId) : 0,
           } : {}),
           is_active: editActive,
-          password: editPassword.trim() ? editPassword.trim() : null,
         }),
       });
       if (editRole !== editUser.role) {
@@ -228,6 +235,45 @@ export const UserManagementPage: React.FC = () => {
     },
   });
 
+
+  const resetPasswordMutation = useMutation({
+    mutationFn: async () => {
+      if (!resetUser) throw new Error("No user selected.");
+      const ticketId = Number(recoveryTicketId);
+
+      if (!Number.isSafeInteger(ticketId) || ticketId < 1 || !verificationConfirmed) {
+        throw new Error("Valid ticket ID and identity verification are required.");
+      }
+
+      return apiRequest<{ temporary_password: string }>(
+        `/users/${resetUser.id}/reset-password`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            recovery_ticket_id: ticketId,
+            identity_verified: true,
+            verification_method: verificationMethod,
+          }),
+        }
+      );
+    },
+    onSuccess: (data) => {
+      setResetTemporaryPassword(data.temporary_password);
+      setResetError(null);
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      resetPasswordMutation.reset();
+    },
+    onError: (err: unknown) => {
+      setResetError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Password reset failed."
+      );
+    },
+  });
+
   const createTeamMutation = useMutation({
     mutationFn: () =>
       apiRequest("/users/support-teams", {
@@ -251,11 +297,31 @@ export const UserManagementPage: React.FC = () => {
     },
   });
 
+
+  const openResetModal = (user: UserDetail) => {
+    resetPasswordMutation.reset();
+    setResetUser(user);
+    setRecoveryTicketId("");
+    setVerificationMethod("in_person_id");
+    setVerificationConfirmed(false);
+    setResetTemporaryPassword(null);
+    setResetError(null);
+  };
+
+  const closeResetModal = () => {
+    if (resetPasswordMutation.isPending) return;
+    setResetUser(null);
+    setRecoveryTicketId("");
+    setVerificationConfirmed(false);
+    setResetTemporaryPassword(null);
+    setResetError(null);
+    resetPasswordMutation.reset();
+  };
+
   const openEditModal = (u: UserDetail) => {
     setEditUser(u);
     setEditName(u.full_name);
     setEditEmail(u.email);
-    setEditPassword("");
     setEditEmpId(u.employee_id || "");
     setEditTitle(u.job_title || "");
     setEditPhone(u.phone || "");
@@ -464,6 +530,16 @@ export const UserManagementPage: React.FC = () => {
                         <Edit3 className="w-3 h-3" />
                         Edit
                       </button>
+                      {u.is_active && (
+                        <button
+                          type="button"
+                          onClick={() => openResetModal(u)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 font-semibold"
+                        >
+                          <KeyRound className="w-3 h-3" />
+                          Reset Password
+                        </button>
+                      )}
                       <button
                         onClick={() => toggleActiveMutation.mutate(u)}
                         className={`px-2 py-1 rounded font-semibold cursor-pointer ${
@@ -721,25 +797,6 @@ export const UserManagementPage: React.FC = () => {
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
                 />
               </div>
-              <div className="sm:col-span-2">
-                <label className="flex items-center justify-between font-bold uppercase text-slate-700 mb-1">
-                  <span>Set New Password (Optional)</span>
-                  <button
-                    type="button"
-                    onClick={() => setShowEditPassword(!showEditPassword)}
-                    className="text-[11px] text-blue-600 hover:underline normal-case font-semibold cursor-pointer"
-                  >
-                    {showEditPassword ? "Hide" : "Show"}
-                  </button>
-                </label>
-                <input
-                  type={showEditPassword ? "text" : "password"}
-                  value={editPassword}
-                  onChange={(e) => setEditPassword(e.target.value)}
-                  placeholder="Leave blank to keep existing password, or enter new password..."
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono"
-                />
-              </div>
               <div>
                 <label className="block font-bold uppercase text-slate-700 mb-1">
                   Assigned Role
@@ -844,6 +901,159 @@ export const UserManagementPage: React.FC = () => {
                 {saveEditUserMutation.isPending ? "Saving..." : "Save Changes"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+
+      {/* Admin-assisted password reset */}
+      {resetUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="admin-reset-title"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 id="admin-reset-title" className="text-lg font-bold text-slate-900">
+                  Admin Password Reset
+                </h3>
+                <p className="text-sm text-slate-600 mt-1">
+                  {resetUser.full_name} ({resetUser.email})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeResetModal}
+                disabled={resetPasswordMutation.isPending}
+                aria-label="Close password reset"
+                className="text-slate-500 disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {!resetTemporaryPassword ? (
+              <div className="space-y-4">
+                <p className="text-xs text-amber-800 bg-amber-50 rounded-lg p-3">
+                  Verify the account holder independently before continuing.
+                  Use the matching Critical IAM Password Recovery ticket.
+                </p>
+
+                <div>
+                  <label
+                    htmlFor="recovery-ticket-id"
+                    className="block text-sm font-semibold text-slate-700 mb-1"
+                  >
+                    Recovery Ticket ID
+                  </label>
+                  <input
+                    id="recovery-ticket-id"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={recoveryTicketId}
+                    onChange={(e) => setRecoveryTicketId(e.target.value)}
+                    placeholder="Ticket database ID"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">
+                    Enter the numeric ticket ID, not the TKT ticket number.
+                  </p>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="verification-method"
+                    className="block text-sm font-semibold text-slate-700 mb-1"
+                  >
+                    Identity Verification Method
+                  </label>
+                  <select
+                    id="verification-method"
+                    value={verificationMethod}
+                    onChange={(e) =>
+                      setVerificationMethod(
+                        e.target.value as
+                          "in_person_id" | "manager_callback" | "hr_confirmation"
+                      )
+                    }
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  >
+                    <option value="in_person_id">In-person ID verification</option>
+                    <option value="manager_callback">Manager callback</option>
+                    <option value="hr_confirmation">HR confirmation</option>
+                  </select>
+                </div>
+
+                <label className="flex items-start gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={verificationConfirmed}
+                    onChange={(e) => setVerificationConfirmed(e.target.checked)}
+                    className="mt-1"
+                  />
+                  I confirm that I independently verified this person's identity.
+                </label>
+
+                {resetError && (
+                  <p className="text-sm text-red-700 bg-red-50 rounded-lg p-3">
+                    {resetError}
+                  </p>
+                )}
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={closeResetModal}
+                    disabled={resetPasswordMutation.isPending}
+                    className="border border-slate-300 rounded-lg px-4 py-2 text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => resetPasswordMutation.mutate()}
+                    disabled={
+                      resetPasswordMutation.isPending ||
+                      !verificationConfirmed ||
+                      !Number.isSafeInteger(Number(recoveryTicketId)) ||
+                      Number(recoveryTicketId) < 1
+                    }
+                    className="bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                  >
+                    {resetPasswordMutation.isPending
+                      ? "Resetting..."
+                      : "Generate Temporary Password"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-sm font-semibold text-emerald-700">
+                  Password reset successful.
+                </p>
+                <p className="text-xs text-slate-600">
+                  This temporary password is shown once. Share it only through
+                  an approved secure channel with the verified account holder.
+                  The user must change it at next sign-in.
+                </p>
+                <div className="bg-slate-100 rounded-lg p-4">
+                  <code className="text-sm font-bold break-all select-all text-slate-900">
+                    {resetTemporaryPassword}
+                  </code>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeResetModal}
+                  className="w-full bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-semibold"
+                >
+                  Close and Clear Temporary Password
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
